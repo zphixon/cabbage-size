@@ -15,21 +15,18 @@ fn main() {
     let server = Server::http("0.0.0.0:8080").expect("server");
 
     for request in server.incoming_requests() {
-        println!(
-            "[{}] received request! {} {}",
-            chrono::Utc::now(),
-            request.method(),
-            request.url(),
-        );
-
         match request.method() {
             Method::Get if request.url() == "/cs" => {
                 let rand: i64 = rand::thread_rng().gen_range(lower, upper + 1);
+
                 if rand == lower {
                     lower -= 1;
+                    println!("[{}] new lower bound: {}", chrono::Utc::now(), lower);
                 }
+
                 if rand == upper {
                     upper += 1;
+                    println!("[{}] new upper bound: {}", chrono::Utc::now(), upper);
                 }
 
                 request
