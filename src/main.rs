@@ -12,7 +12,7 @@ fn main() {
     let mut lower = lower.trim().parse::<i64>().expect("parse lower");
 
     println!("[{}] starting", chrono::Utc::now());
-    let server = Server::http("0.0.0.0:8080").expect("server");
+    let server = Server::http("0.0.0.0:12002").expect("server");
 
     for request in server.incoming_requests() {
         match request.method() {

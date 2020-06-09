@@ -3,6 +3,6 @@
 get the size of your cabbage
 
 ```
-$ curl localhost:8080/cs
+$ curl localhost:12002/cs
 38
 ```
