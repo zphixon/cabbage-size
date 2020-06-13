@@ -1,3 +1,4 @@
+use chrono::Utc;
 use rand::Rng;
 use tiny_http::{Method, Response, Server};
 
@@ -11,7 +12,8 @@ fn main() {
     let mut upper = upper.trim().parse::<i64>().expect("parse upper");
     let mut lower = lower.trim().parse::<i64>().expect("parse lower");
 
-    println!("[{}] starting", chrono::Utc::now());
+    println!("[{}] starting", Utc::now());
+    let start = Utc::now();
     let server = Server::http("0.0.0.0:12002").expect("server");
 
     for request in server.incoming_requests() {
@@ -21,21 +23,37 @@ fn main() {
 
                 if rand == lower {
                     lower -= 1;
-                    println!("[{}] new lower bound: {}", chrono::Utc::now(), lower);
+                    println!("[{}] new lower bound: {}", Utc::now(), lower);
                 }
 
                 if rand == upper {
                     upper += 1;
-                    println!("[{}] new upper bound: {}", chrono::Utc::now(), upper);
+                    println!("[{}] new upper bound: {}", Utc::now(), upper);
                 }
 
                 request
                     .respond(Response::from_string(format!("{}", rand)))
-                    .expect("response");
+                    .expect("response /cs");
+            }
+
+            Method::Get if request.url() == "/up" => {
+                let diff = Utc::now() - start;
+
+                let days = diff.num_days();
+                let hours = diff.num_hours() % 24;
+                let minutes = diff.num_minutes() % 60;
+                let seconds = diff.num_seconds() % 60;
+
+                request
+                    .respond(Response::from_string(format!(
+                        "{}d {}h {}m {}s",
+                        days, hours, minutes, seconds,
+                    )))
+                    .expect("response /up");
             }
 
             Method::Post if request.url() == "/po" => {
-                println!("[{}] shutting down!", chrono::Utc::now());
+                println!("[{}] shutting down!", Utc::now());
                 break;
             }
 
