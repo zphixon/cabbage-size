@@ -1,3 +1,5 @@
+echo "Resetting cabbage size records"
+
 ./stop.sh
 
 echo '1' > lower_cabbage_size
