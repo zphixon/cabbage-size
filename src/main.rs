@@ -5,7 +5,10 @@ use url::Url;
 
 const USER_ID_URL: &'static str = "https://api.twitch.tv/helix/users";
 const TOKEN_URL: &'static str = "https://id.twitch.tv/oauth2/token";
-const DEFAULT_UPPER_LOWER: (i64, i64) = (100, 1);
+const DEFAULT_UPPER_LOWER: Bounds = Bounds {
+    upper: 100,
+    lower: 1,
+};
 
 #[derive(serde::Deserialize)]
 struct Users {
@@ -38,10 +41,16 @@ struct SizeResponse {
     message: &'static str,
 }
 
+#[derive(Debug)]
+struct Bounds {
+    upper: i64,
+    lower: i64,
+}
+
 lazy_static::lazy_static! {
     static ref VIEWERS: dashmap::DashMap<User, Vec<LastChecked>> = dashmap::DashMap::new();
     static ref VIEWER_CACHE: dashmap::DashMap<String, User> = dashmap::DashMap::new();
-    static ref STREAMERS: dashmap::DashMap<User, (i64, i64)> = dashmap::DashMap::new();
+    static ref STREAMERS: dashmap::DashMap<User, Bounds> = dashmap::DashMap::new();
     static ref STREAMER_CACHE: dashmap::DashMap<String,  User> = dashmap::DashMap::new();
 }
 
@@ -183,8 +192,8 @@ fn reset(auth: &Auth, client_id: &str, url: &str) -> Result<(), (&'static str, u
     let url = Url::parse(&format!("a://a{}", url)).map_err(|_| ("invalid request URL", 500))?;
 
     let mut streamer: Option<String> = None;
-    let mut upper = DEFAULT_UPPER_LOWER.0;
-    let mut lower = DEFAULT_UPPER_LOWER.1;
+    let mut upper = DEFAULT_UPPER_LOWER.upper;
+    let mut lower = DEFAULT_UPPER_LOWER.lower;
 
     for (k, v) in url.query_pairs() {
         match k.as_ref() {
@@ -212,6 +221,10 @@ fn reset(auth: &Auth, client_id: &str, url: &str) -> Result<(), (&'static str, u
         .get(0)
         .ok_or_else(|| ("no streamer by that name", 400))?;
 
+    if upper < lower {
+        return Err(("upper is greater than lower bound?", 400));
+    }
+
     println!(
         "[{}] resetting {} to {}, {}",
         Utc::now(),
@@ -222,9 +235,9 @@ fn reset(auth: &Auth, client_id: &str, url: &str) -> Result<(), (&'static str, u
 
     if STREAMERS.contains_key(streamer) {
         // panic safety: the map contains the streamer
-        *STREAMERS.get_mut(streamer).unwrap().value_mut() = (upper, lower);
+        *STREAMERS.get_mut(streamer).unwrap().value_mut() = Bounds { upper, lower };
     } else {
-        STREAMERS.insert(streamer.clone(), (upper, lower));
+        STREAMERS.insert(streamer.clone(), Bounds { upper, lower });
     }
 
     Ok(())
@@ -285,7 +298,7 @@ fn main() {
                             // panic safety: we know the streamer exists in the map
                             STREAMERS.get_mut(&streamer).unwrap()
                         };
-                        let (upper, lower) = value.value_mut();
+                        let Bounds { upper, lower } = value.value_mut();
 
                         let rand: i64 = rand::thread_rng().gen_range(*lower, *upper + 1);
 
