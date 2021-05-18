@@ -384,6 +384,10 @@ fn main() {
                 // VIEWER_CACHE.clear(); // TODO?
             }
 
+            Method::Post if request.url() == "/clear" => {
+                VIEWERS.clear();
+            }
+
             Method::Get if request.url() == "/status" => {
                 print!("viewer cache: ");
                 for kv in VIEWER_CACHE.iter() {
