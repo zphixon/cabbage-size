@@ -248,7 +248,7 @@ fn main() {
                 let rand: i64 = rand::thread_rng().gen_range(lower, upper + 1);
                 println!("[{}] legacy api => {}", Utc::now(), rand);
                 request
-                    .respond(Response::from_string(format!("{}", rand)).with_status_code(308))
+                    .respond(Response::from_string(format!("{}", rand)))
                     .unwrap();
             }
 
