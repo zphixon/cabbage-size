@@ -39,7 +39,9 @@ struct SizeResponse {
 
 lazy_static::lazy_static! {
     static ref VIEWERS: dashmap::DashMap<User, Vec<LastChecked>> = dashmap::DashMap::new();
+    static ref VIEWER_CACHE: dashmap::DashMap<String, User> = dashmap::DashMap::new();
     static ref STREAMERS: dashmap::DashMap<User, (i64, i64)> = dashmap::DashMap::new();
+    static ref STREAMER_CACHE: dashmap::DashMap<String,  User> = dashmap::DashMap::new();
 }
 
 fn get_id(
@@ -87,30 +89,49 @@ fn validate(client_id: &str, auth: &Auth, url: &str) -> Result<(User, User), (&'
     let viewer = viewer.unwrap();
     let streamer = streamer.unwrap();
 
-    // get viewer and streamer IDs
-    let viewer_id_response = get_id(&auth, &viewer, client_id)?;
-    if viewer_id_response.status().is_client_error() {
-        return Err(("couldn't request viewer ID from twitch API", 500));
+    if !VIEWER_CACHE.contains_key(&viewer) {
+        println!("viewer not cached!");
+        let viewer_id_response = get_id(&auth, &viewer, client_id)?;
+        if viewer_id_response.status().is_client_error() {
+            return Err(("couldn't request viewer ID from twitch API", 500));
+        }
+        let viewers = viewer_id_response
+            .json::<Users>()
+            .map_err(|_| ("invalid JSON from twitch (viewer id)", 500))?;
+        VIEWER_CACHE.insert(
+            viewer.clone(),
+            viewers
+                .data
+                .get(0)
+                .ok_or_else(|| ("no viewer by that name", 400))?
+                .clone(),
+        );
     }
-    let viewers = viewer_id_response
-        .json::<Users>()
-        .map_err(|_| ("invalid JSON from twitch (viewer id)", 500))?;
-    let viewer = viewers
-        .data
-        .get(0)
-        .ok_or_else(|| ("no viewer by that name", 400))?;
 
-    let streamer_id_response = get_id(&auth, &streamer, client_id)?;
-    if streamer_id_response.status().is_client_error() {
-        return Err(("couldn't request streamer ID from twitch API", 500));
+    if !STREAMER_CACHE.contains_key(&streamer) {
+        println!("streamer not cached!");
+        let streamer_id_response = get_id(&auth, &streamer, client_id)?;
+        if streamer_id_response.status().is_client_error() {
+            return Err(("couldn't request streamer ID from twitch API", 500));
+        }
+        let streamers = streamer_id_response
+            .json::<Users>()
+            .map_err(|_| ("invalid JSON from twitch (streamer ID)", 500))?;
+        STREAMER_CACHE.insert(
+            streamer.clone(),
+            streamers
+                .data
+                .get(0)
+                .ok_or_else(|| ("no streamer by that name", 400))?
+                .clone(),
+        );
     }
-    let streamers = streamer_id_response
-        .json::<Users>()
-        .map_err(|_| ("invalid JSON from twitch (streamer ID)", 500))?;
-    let streamer = streamers
-        .data
-        .get(0)
-        .ok_or_else(|| ("no streamer by that name", 400))?;
+
+    // panic safety: we know the caches contain the viewer and streamer
+    let cached_viewer = VIEWER_CACHE.get(&viewer).unwrap();
+    let viewer = cached_viewer.value();
+    let cached_streamer = STREAMER_CACHE.get(&streamer).unwrap();
+    let streamer = cached_streamer.value();
 
     if VIEWERS.contains_key(viewer) {
         // the viewer is known
