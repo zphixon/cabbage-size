@@ -27,6 +27,7 @@ struct Auth {
 #[derive(Debug)]
 struct LastChecked {
     time: chrono::DateTime<Utc>,
+    limit: Option<i64>,
     streamer: User,
 }
 
@@ -90,7 +91,6 @@ fn validate(client_id: &str, auth: &Auth, url: &str) -> Result<(User, User), (&'
     let streamer = streamer.unwrap();
 
     if !VIEWER_CACHE.contains_key(&viewer) {
-        println!("viewer not cached!");
         let viewer_id_response = get_id(&auth, &viewer, client_id)?;
         if viewer_id_response.status().is_client_error() {
             return Err(("couldn't request viewer ID from twitch API", 500));
@@ -109,7 +109,6 @@ fn validate(client_id: &str, auth: &Auth, url: &str) -> Result<(User, User), (&'
     }
 
     if !STREAMER_CACHE.contains_key(&streamer) {
-        println!("streamer not cached!");
         let streamer_id_response = get_id(&auth, &streamer, client_id)?;
         if streamer_id_response.status().is_client_error() {
             return Err(("couldn't request streamer ID from twitch API", 500));
@@ -160,6 +159,7 @@ fn validate(client_id: &str, auth: &Auth, url: &str) -> Result<(User, User), (&'
             // the viewer has never checked their size in this chat, but has in others
             last_checked_streams.value_mut().push(LastChecked {
                 streamer: streamer.clone(),
+                limit: time_limit,
                 time: Utc::now(),
             });
         }
@@ -169,6 +169,7 @@ fn validate(client_id: &str, auth: &Auth, url: &str) -> Result<(User, User), (&'
             viewer.clone(),
             vec![LastChecked {
                 streamer: streamer.clone(),
+                limit: time_limit,
                 time: Utc::now(),
             }],
         );
@@ -367,6 +368,44 @@ fn main() {
             Method::Post if request.url() == "/poweroff" => {
                 println!("[{}] shutting down!", Utc::now());
                 break;
+            }
+
+            Method::Post if request.url() == "/clean" => {
+                let now = Utc::now();
+                VIEWERS.iter_mut().for_each(|mut rmm| {
+                    rmm.value_mut().retain(|check| {
+                        // if the check has a time limit and it's passed, remove the check
+                        check.limit.is_some()
+                            && (now - check.time).num_seconds() <= check.limit.unwrap()
+                    })
+                });
+                // remove viewers with no checks
+                VIEWERS.retain(|_, checks| !checks.is_empty())
+                // VIEWER_CACHE.clear(); // TODO?
+            }
+
+            Method::Get if request.url() == "/status" => {
+                print!("viewer cache: ");
+                for kv in VIEWER_CACHE.iter() {
+                    print!("{} => {:?}, ", kv.key(), kv.value());
+                }
+                println!("\n**************************");
+
+                print!("viewers: ");
+                for kv in VIEWERS.iter() {
+                    print!("{} => {:?}, ", kv.key().display_name, kv.value());
+                }
+                println!("\n**************************");
+
+                print!("streamers: ");
+                for kv in STREAMERS.iter() {
+                    print!("{} => {:?}, ", kv.key().display_name, kv.value());
+                }
+                println!("\n**************************");
+                println!();
+                request
+                    .respond(Response::from_string("status written to log"))
+                    .unwrap();
             }
 
             Method::Put if request.url().starts_with("/reset") => {
