@@ -155,6 +155,7 @@ fn validate(client_id: &str, auth: &Auth, url: &str) -> Result<(User, User), (&'
 
             // update the time checked
             last_checked.time = Utc::now();
+            last_checked.limit = time_limit;
         } else {
             // the viewer has never checked their size in this chat, but has in others
             last_checked_streams.value_mut().push(LastChecked {
