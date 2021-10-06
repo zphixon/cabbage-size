@@ -1,0 +1,14 @@
+[Unit]
+Description=cabbage size
+After=network.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=1
+User=zack
+ExecStart=/home/zack/cabbage-size/target/debug/cs
+
+[Install]
+WantedBy=multi-user.target
