@@ -36,13 +36,13 @@ $ curl -sX GET localhost:12002/size?viewer=teej_dv&streamer=theprimeagen
 example with time limit:
 
 ```shell
-$ curl -sX GET localhost12002/size?viewer=teej_dv&streamer=theprimeagen&time_limit=600
+$ curl -sX GET localhost:12002/size?viewer=teej_dv&streamer=theprimeagen&time_limit=600
 {"size":3,"is_message":false,"message":""}
 $ # instantly
-$ curl -sX GET localhost12002/size?viewer=teej_dv&streamer=theprimeagen&time_limit=600
+$ curl -sX GET localhost:12002/size?viewer=teej_dv&streamer=theprimeagen&time_limit=600
 {"size":200,"is_message":true,"message":"try again later :)"}
 $ # 10 minutes later
-$ curl -sX GET localhost12002/size?viewer=teej_dv&streamer=theprimeagen&time_limit=600
+$ curl -sX GET localhost:12002/size?viewer=teej_dv&streamer=theprimeagen&time_limit=600
 {"size":99,"is_message":false,"message":""}
 ```
 
