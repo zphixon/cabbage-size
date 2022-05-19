@@ -9,6 +9,7 @@ Restart=always
 RestartSec=1
 User=zack
 ExecStart=/home/zack/cabbage-size/target/debug/cs
+Environment="ROCKET_CONFIG=/home/zack/cabbage-size/Rocket.toml"
 
 [Install]
 WantedBy=multi-user.target

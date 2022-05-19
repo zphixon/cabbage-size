@@ -1,30 +1,45 @@
+// vim: set nu rnu sw=4 et ai si
+
+#[macro_use]
+extern crate rocket;
+
 use chrono::Utc;
+use dashmap::DashMap;
+use once_cell::sync::Lazy;
 use rand::Rng;
-use tiny_http::{Method, Response, Server};
-use url::Url;
+use rocket::{
+    http::Status, response::status::Custom as Response, serde::json::Json, State,
+};
+use serde::{Deserialize, Serialize};
 
 const USER_ID_URL: &'static str = "https://api.twitch.tv/helix/users";
 const TOKEN_URL: &'static str = "https://id.twitch.tv/oauth2/token";
-const DEFAULT_UPPER_LOWER: Bounds = Bounds {
-    upper: 100,
-    lower: 1,
-};
 
-#[derive(serde::Deserialize)]
+static VIEWERS: Lazy<DashMap<User, Vec<LastChecked>>> = Lazy::new(|| DashMap::new());
+static STREAMERS: Lazy<DashMap<User, Bounds>> = Lazy::new(|| DashMap::new());
+static USER_CACHE: Lazy<DashMap<String, User>> = Lazy::new(|| DashMap::new());
+
+#[derive(Debug, Deserialize)]
 struct Users {
     data: Vec<User>,
 }
 
-#[derive(serde::Deserialize, PartialEq, Eq, Hash, Debug, Clone)]
+#[derive(Deserialize, PartialEq, Eq, Hash, Debug, Clone)]
 struct User {
     id: String,
     display_name: String,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, Deserialize)]
 struct Auth {
     access_token: String,
+    #[allow(dead_code)]
     expires_in: i64,
+}
+
+#[derive(Debug)]
+struct ClientId {
+    client_id: &'static str,
 }
 
 #[derive(Debug)]
@@ -32,9 +47,10 @@ struct LastChecked {
     time: chrono::DateTime<Utc>,
     limit: Option<i64>,
     streamer: User,
+    size: i64,
 }
 
-#[derive(serde::Serialize)]
+#[derive(Serialize)]
 struct SizeResponse {
     size: i64,
     is_message: bool,
@@ -47,446 +63,199 @@ struct Bounds {
     lower: i64,
 }
 
-lazy_static::lazy_static! {
-    static ref VIEWERS: dashmap::DashMap<User, Vec<LastChecked>> = dashmap::DashMap::new();
-    static ref VIEWER_CACHE: dashmap::DashMap<String, User> = dashmap::DashMap::new();
-    static ref STREAMERS: dashmap::DashMap<User, Bounds> = dashmap::DashMap::new();
-    static ref STREAMER_CACHE: dashmap::DashMap<String,  User> = dashmap::DashMap::new();
+impl Default for Bounds {
+    fn default() -> Self {
+        Bounds {
+            upper: 100,
+            lower: 1,
+        }
+    }
 }
 
-fn get_id(
-    auth: &Auth,
-    username: &str,
-    client_id: &str,
-) -> Result<reqwest::blocking::Response, (&'static str, u16)> {
-    reqwest::blocking::Client::new()
-        .get(
-            Url::parse_with_params(USER_ID_URL, &[("login", username)])
-                // panic safety: username is validated
-                .unwrap()
-                .as_str(),
-        )
-        .header("Authorization", &format!("Bearer {}", auth.access_token))
-        .header("Client-Id", client_id)
+#[get("/cs")]
+fn legacy() -> String {
+    let rand: i64 = rand::thread_rng().gen_range(1..=100);
+    format!("{rand}")
+}
+
+async fn get_user(
+    auth: &State<Auth>,
+    client_id: &State<ClientId>,
+    user: &str,
+) -> Result<User, Response<Json<SizeResponse>>> {
+    if let Some(user_data) = USER_CACHE.get(user) {
+        return Ok(user_data.clone());
+    }
+
+    let client = reqwest::Client::new();
+    let params = [("login", user)];
+
+    let user_response = client
+        .get(USER_ID_URL)
+        .query(&params)
+        .bearer_auth(&auth.access_token)
+        .header("Client-Id", client_id.client_id)
         .send()
-        .map_err(|_| ("couldn't request user ID from twitch API", 500))
+        .await;
+
+    let user_response: reqwest::Response = match user_response {
+        Ok(user_response) => user_response,
+        Err(_) => {
+            return Err(Response(
+                Status::InternalServerError,
+                Json(SizeResponse {
+                    size: 500,
+                    is_message: true,
+                    message: "twitch api request failed",
+                }),
+            ))
+        }
+    };
+
+    let users = user_response.json::<Users>().await;
+    let mut users = match users {
+        Ok(users) => users,
+        Err(e) => {
+            dbg!(e);
+            return Err(Response(
+                Status::InternalServerError,
+                Json(SizeResponse {
+                    size: 500,
+                    is_message: true,
+                    message: "twitch json response nonsensical",
+                }),
+            ));
+        }
+    };
+
+    if users.data.is_empty() {
+        Err(Response(
+            Status::InternalServerError,
+            Json(SizeResponse {
+                size: 500,
+                is_message: true,
+                message: "twitch returned no users",
+            }),
+        ))
+    } else {
+        let user_data = users.data.pop().unwrap();
+        USER_CACHE.insert(user.into(), user_data.clone());
+        Ok(user_data)
+    }
 }
 
-fn validate(client_id: &str, auth: &Auth, url: &str) -> Result<(User, User), (&'static str, u16)> {
-    // get the query parameters
-    let url = Url::parse(&format!("a://a{}", url)).map_err(|_| ("invalid request URL", 500))?;
-
-    let mut viewer: Option<String> = None;
-    let mut streamer: Option<String> = None;
-    let mut time_limit: Option<i64> = None;
-
-    for (k, v) in url.query_pairs() {
-        match k.as_ref() {
-            "streamer" => streamer = Some(v.parse().map_err(|_| ("invalid streamer name", 400))?),
-            "viewer" => viewer = Some(v.parse().map_err(|_| ("invalid viewer name", 400))?),
-            "time_limit" => time_limit = Some(v.parse().map_err(|_| ("invalid time limit", 400))?),
-            _ => {}
-        }
+fn make_size(bounds: &mut Bounds) -> i64 {
+    let Bounds { upper, lower } = bounds;
+    let rand: i64 = rand::thread_rng().gen_range(*lower..=*upper);
+    if rand == *lower {
+        *lower -= 1;
+    } else if rand == *upper {
+        *upper += 1;
     }
+    rand
+}
 
-    // viewer and streamer required
-    if viewer.is_none() || streamer.is_none() {
-        return Err(("viewer and streamer required", 400));
-    }
+#[get("/size?<viewer>&<streamer>&<time_limit>")]
+async fn size(
+    viewer: &str,
+    streamer: &str,
+    time_limit: Option<i64>,
+    auth: &State<Auth>,
+    client_id: &State<ClientId>,
+) -> Response<Json<SizeResponse>> {
+    let viewer = match get_user(auth, client_id, viewer).await {
+        Ok(viewer) => viewer,
+        Err(response) => return response,
+    };
 
-    // viewer and streamer names
-    // panic safety: viewer is validated
-    let viewer = viewer.unwrap();
-    let streamer = streamer.unwrap();
+    let streamer = match get_user(auth, client_id, streamer).await {
+        Ok(streamer) => streamer,
+        Err(response) => return response,
+    };
 
-    if !VIEWER_CACHE.contains_key(&viewer) {
-        let viewer_id_response = get_id(&auth, &viewer, client_id)?;
-        if viewer_id_response.status().is_client_error() {
-            return Err(("couldn't request viewer ID from twitch API", 500));
-        }
-        let viewers = viewer_id_response
-            .json::<Users>()
-            .map_err(|_| ("invalid JSON from twitch (viewer id)", 500))?;
-        VIEWER_CACHE.insert(
-            viewer.clone(),
-            viewers
-                .data
-                .get(0)
-                .ok_or_else(|| ("no viewer by that name", 400))?
-                .clone(),
-        );
-    }
-
-    if !STREAMER_CACHE.contains_key(&streamer) {
-        let streamer_id_response = get_id(&auth, &streamer, client_id)?;
-        if streamer_id_response.status().is_client_error() {
-            return Err(("couldn't request streamer ID from twitch API", 500));
-        }
-        let streamers = streamer_id_response
-            .json::<Users>()
-            .map_err(|_| ("invalid JSON from twitch (streamer ID)", 500))?;
-        STREAMER_CACHE.insert(
-            streamer.clone(),
-            streamers
-                .data
-                .get(0)
-                .ok_or_else(|| ("no streamer by that name", 400))?
-                .clone(),
-        );
-    }
-
-    // panic safety: we know the caches contain the viewer and streamer
-    let cached_viewer = VIEWER_CACHE.get(&viewer).unwrap();
-    let viewer = cached_viewer.value();
-    let cached_streamer = STREAMER_CACHE.get(&streamer).unwrap();
-    let streamer = cached_streamer.value();
-
-    if VIEWERS.contains_key(viewer) {
-        // the viewer is known
-        // panic safety: the viewer exists in the map
-        let mut last_checked_streams = VIEWERS.get_mut(viewer).unwrap();
-        let last_checked = last_checked_streams
-            .value_mut()
-            .iter_mut()
-            .find(|lc| &lc.streamer == streamer);
-
-        if let Some(last_checked) = last_checked {
-            // the viewer has checked their size in this chat before
-            if let Some(limit) = time_limit {
-                // there is a time limit
-                if (Utc::now() - last_checked.time).num_seconds() <= limit {
-                    // the user hasn't waited long enough
-                    return Err(("try again later :)", 200));
-                }
+    let lc: &mut LastChecked;
+    let mut last_checked_streams = VIEWERS.entry(viewer).or_default();
+    if let Some(last_checked) = last_checked_streams
+        .iter_mut()
+        .find(|lc| lc.streamer == streamer)
+    {
+        // we have checked our size in this streamer's chat before
+        if let Some(limit) = time_limit {
+            // there is a time limit
+            if (Utc::now() - last_checked.time).num_seconds() <= limit {
+                // the time limit has not elapsed - do not update the size, just return it
+                return Response(
+                    Status::Ok,
+                    Json(SizeResponse {
+                        size: last_checked.size,
+                        is_message: false,
+                        message: "",
+                    }),
+                );
             } else {
-                // there is no time limit
+                // we are past the time limit - get a new size
             }
-
-            // update the time checked
-            last_checked.time = Utc::now();
-            last_checked.limit = time_limit;
         } else {
-            // the viewer has never checked their size in this chat, but has in others
-            last_checked_streams.value_mut().push(LastChecked {
-                streamer: streamer.clone(),
-                limit: time_limit,
-                time: Utc::now(),
-            });
+            // there is no time limit - get a new size
         }
+
+        last_checked.time = Utc::now();
+        last_checked.limit = time_limit;
+        lc = last_checked;
     } else {
-        // the viewer is unknown
-        VIEWERS.insert(
-            viewer.clone(),
-            vec![LastChecked {
-                streamer: streamer.clone(),
-                limit: time_limit,
-                time: Utc::now(),
-            }],
-        );
+        // we have not checked our size in this streamer's chat before - get a new size
+        last_checked_streams.push(LastChecked {
+            streamer: streamer.clone(),
+            limit: time_limit,
+            time: Utc::now(),
+            size: 0,
+        });
+        lc = last_checked_streams.last_mut().unwrap();
     }
 
-    Ok((streamer.clone(), viewer.clone()))
+    let mut bounds = STREAMERS.entry(streamer).or_default();
+    let size = make_size(&mut bounds);
+    lc.size = size;
+
+    Response(
+        Status::Ok,
+        Json(SizeResponse {
+            size,
+            is_message: false,
+            message: "",
+        }),
+    )
 }
 
-fn reset(auth: &Auth, client_id: &str, url: &str) -> Result<(), (&'static str, u16)> {
-    let url = Url::parse(&format!("a://a{}", url)).map_err(|_| ("invalid request URL", 500))?;
-
-    let mut streamer: Option<String> = None;
-    let mut upper = DEFAULT_UPPER_LOWER.upper;
-    let mut lower = DEFAULT_UPPER_LOWER.lower;
-
-    for (k, v) in url.query_pairs() {
-        match k.as_ref() {
-            "streamer" => streamer = Some(v.parse().map_err(|_| ("invalid streamer name", 400))?),
-            "upper" => upper = v.parse().map_err(|_| ("invalid upper size", 400))?,
-            "lower" => lower = v.parse().map_err(|_| ("invalid lower size", 400))?,
-            _ => {}
-        }
-    }
-    if streamer.is_none() {
-        return Err(("need streamer name", 400));
-    }
-    // panic safety: the value is validated
-    let streamer = streamer.unwrap();
-
-    let streamer_id_response = get_id(&auth, &streamer, client_id)?;
-    if streamer_id_response.status().is_client_error() {
-        return Err(("couldn't request streamer ID from twitch API", 500));
-    }
-    let streamers = streamer_id_response
-        .json::<Users>()
-        .map_err(|_| ("invalid JSON from twitch (streamer ID)", 500))?;
-    let streamer = streamers
-        .data
-        .get(0)
-        .ok_or_else(|| ("no streamer by that name", 400))?;
-
-    if upper < lower {
-        return Err(("upper is greater than lower bound?", 400));
-    }
-
-    println!(
-        "[{}] resetting {} to {}, {}",
-        Utc::now(),
-        streamer.display_name,
-        upper,
-        lower
-    );
-
-    if STREAMERS.contains_key(streamer) {
-        // panic safety: the map contains the streamer
-        *STREAMERS.get_mut(streamer).unwrap().value_mut() = Bounds { upper, lower };
-    } else {
-        STREAMERS.insert(streamer.clone(), Bounds { upper, lower });
-    }
-
-    Ok(())
-}
-
-fn main() {
-    // get twitch api authentication
+#[rocket::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client_id = include_str!("../client_id").trim();
     let client_secret = include_str!("../client_secret").trim();
 
-    // panic safety: it's worked a bunch of times before? lol
-    let auth_url = Url::parse_with_params(
-        TOKEN_URL,
-        &[
-            ("client_id", client_id),
-            ("client_secret", client_secret),
-            ("grant_type", "client_credentials"),
-            ("scope", "user:read:subscriptions"),
-        ],
-    )
-    .unwrap();
+    let params = [
+        ("client_id", client_id),
+        ("client_secret", client_secret),
+        ("grant_type", "client_credentials"),
+        ("scope", "user:read:subscriptions"),
+    ];
 
-    // panic safety: we don't take any user-facing input, twitch's API is probably stable
-    // TODO: try again and back off if we can't connect
-    let auth = reqwest::blocking::Client::new()
-        .post(auth_url.clone())
+    let client = reqwest::Client::new();
+    let auth = client
+        .post(TOKEN_URL)
+        .form(&params)
         .send()
-        .unwrap()
+        .await?
         .json::<Auth>()
-        .unwrap();
+        .await?;
 
-    // start the server
-    println!("[{}] starting - auth={:?}", Utc::now(), auth);
+    println!("[{}] starting {auth:?}", Utc::now());
 
-    // panic safety: no user-facing input
-    let server = Server::http("0.0.0.0:12002").expect("server");
-    let start = Utc::now();
+    let _rocket = rocket::build()
+        .manage(auth)
+        .manage(ClientId { client_id })
+        .mount("/", routes![legacy, size])
+        .launch()
+        .await?;
 
-    for request in server.incoming_requests() {
-        match request.method() {
-            Method::Get if request.url() == "/cs" => {
-                let lower = 1;
-                let upper = 100;
-                let rand: i64 = rand::thread_rng().gen_range(lower, upper + 1);
-                println!("[{}] legacy api => {}", Utc::now(), rand);
-                request
-                    .respond(Response::from_string(format!("{}", rand)))
-                    .unwrap();
-            }
-
-            Method::Get if request.url().starts_with("/size") => {
-                match validate(client_id, &auth, request.url()) {
-                    Ok((streamer, viewer)) => {
-                        let mut value = if let Some(bounds) = STREAMERS.get_mut(&streamer) {
-                            bounds
-                        } else {
-                            STREAMERS.insert(streamer.clone(), DEFAULT_UPPER_LOWER);
-                            // panic safety: we know the streamer exists in the map
-                            STREAMERS.get_mut(&streamer).unwrap()
-                        };
-                        let Bounds { upper, lower } = value.value_mut();
-
-                        let rand: i64 = rand::thread_rng().gen_range(*lower, *upper + 1);
-
-                        if rand == *lower {
-                            *lower = *lower - 1;
-                            println!(
-                                "[{}] {}: {} is unlucky - new lower bound: {}",
-                                Utc::now(),
-                                streamer.display_name,
-                                viewer.display_name,
-                                lower
-                            );
-                        } else if rand == *upper {
-                            *upper = *upper + 1;
-                            println!(
-                                "[{}] {}: {} is blessed - new upper bound: {}",
-                                Utc::now(),
-                                streamer.display_name,
-                                viewer.display_name,
-                                upper
-                            );
-                        }
-
-                        println!(
-                            "[{}] {}: {} got {}",
-                            Utc::now(),
-                            streamer.display_name,
-                            viewer.display_name,
-                            rand
-                        );
-
-                        // panic safety: no custom serialization impl
-                        // panic safety: TODO: do nothing if we can't respond
-                        request
-                            .respond(Response::from_string(
-                                serde_json::to_string(&SizeResponse {
-                                    size: rand,
-                                    is_message: false,
-                                    message: "",
-                                })
-                                .unwrap(),
-                            ))
-                            .unwrap()
-                    }
-
-                    // panic safety: no custom serialization impl
-                    // panic safety: TODO: do nothing if we can't respond
-                    Err((body, status)) => request
-                        .respond(
-                            Response::from_string(
-                                serde_json::to_string(&SizeResponse {
-                                    size: status as i64,
-                                    is_message: true,
-                                    message: body,
-                                })
-                                .unwrap(),
-                            )
-                            .with_status_code(status),
-                        )
-                        .unwrap(),
-                }
-            }
-
-            Method::Get if request.url() == "/up" => {
-                let diff = Utc::now() - start;
-
-                let days = diff.num_days();
-                let hours = diff.num_hours() % 24;
-                let minutes = diff.num_minutes() % 60;
-                let seconds = diff.num_seconds() % 60;
-
-                // panic safety: TODO: do nothing if we can't respond
-                request
-                    .respond(Response::from_string(format!(
-                        "{}d {}h {}m {}s",
-                        days, hours, minutes, seconds,
-                    )))
-                    .expect("response /up");
-            }
-
-            Method::Post if request.url() == "/poweroff" => {
-                println!("[{}] shutting down!", Utc::now());
-                break;
-            }
-
-            Method::Post if request.url() == "/clean" => {
-                let now = Utc::now();
-                VIEWERS.iter_mut().for_each(|mut rmm| {
-                    rmm.value_mut().retain(|check| {
-                        // if the check has a time limit and it's passed, remove the check
-                        check.limit.is_some()
-                            && (now - check.time).num_seconds() <= check.limit.unwrap()
-                    })
-                });
-                // remove viewers with no checks
-                VIEWERS.retain(|_, checks| !checks.is_empty())
-                // VIEWER_CACHE.clear(); // TODO?
-            }
-
-            Method::Post if request.url() == "/clear" => {
-                VIEWERS.clear();
-            }
-
-            Method::Get if request.url() == "/status" => {
-                print!("viewer cache: ");
-                for kv in VIEWER_CACHE.iter() {
-                    print!("{} => {:?}, ", kv.key(), kv.value());
-                }
-                println!("\n**************************");
-
-                print!("viewers: ");
-                for kv in VIEWERS.iter() {
-                    print!("{} => {:?}, ", kv.key().display_name, kv.value());
-                }
-                println!("\n**************************");
-
-                print!("streamers: ");
-                for kv in STREAMERS.iter() {
-                    print!("{} => {:?}, ", kv.key().display_name, kv.value());
-                }
-                println!("\n**************************");
-                println!();
-                request
-                    .respond(Response::from_string("status written to log"))
-                    .unwrap();
-            }
-
-            Method::Put if request.url().starts_with("/reset") => {
-                match reset(&auth, client_id, request.url()) {
-                    // panic safety: no custom serialization impl
-                    // panic safety: TODO: do nothing if we can't respond
-                    Ok(()) => request
-                        .respond(Response::from_string(
-                            serde_json::to_string(&SizeResponse {
-                                size: 0,
-                                is_message: true,
-                                message: "reset size",
-                            })
-                            .unwrap(),
-                        ))
-                        .unwrap(),
-
-                    // panic safety: no custom serialization impl
-                    // panic safety: TODO: do nothing if we can't respond
-                    Err((body, status)) => request
-                        .respond(
-                            Response::from_string(
-                                serde_json::to_string(&SizeResponse {
-                                    size: status as i64,
-                                    is_message: true,
-                                    message: body,
-                                })
-                                .unwrap(),
-                            )
-                            .with_status_code(status),
-                        )
-                        .unwrap(),
-                }
-            }
-
-            // panic safety: TODO: do nothing if we can't respond
-            _ => request
-                .respond(Response::from_string("Invalid request!").with_status_code(400))
-                .expect("error message"),
-        }
-    }
-}
-
-#[cfg(test)]
-#[test]
-fn test() {
-    // this could still fail, but it's super unlikely
-
-    let mut lower = 1;
-    let mut upper = 10;
-
-    for _ in 0..10000 {
-        let rand: i64 = rand::thread_rng().gen_range(lower, upper + 1);
-
-        if rand == lower {
-            lower -= 1;
-        }
-
-        if rand == upper {
-            upper += 1;
-        }
-    }
-
-    assert_ne!(lower, 1);
-    assert_ne!(upper, 10);
+    Ok(())
 }
