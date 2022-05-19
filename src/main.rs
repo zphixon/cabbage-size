@@ -1,141 +1,27 @@
 #[macro_use]
 extern crate rocket;
 
-use std::collections::{hash_map::Entry, HashMap};
+use std::collections::hash_map::Entry;
 
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use rand::Rng;
-use rocket::{http::Status, response::status::Custom, serde::json::Json, State};
-use serde::{Deserialize, Serialize};
+use rocket::{http::Status, State};
 
-const USER_ID_URL: &'static str = "https://api.twitch.tv/helix/users";
-const TOKEN_URL: &'static str = "https://id.twitch.tv/oauth2/token";
+use cs::{
+    make_response, ok_response, Auth, Boon, BoonKind, BoonLength, Bounds, ChannelStatus, ClientId,
+    LastChecked, SizeResponse, User, Users, TOKEN_URL, USER_ID_URL,
+};
 
 static VIEWERS: Lazy<DashMap<User, Vec<LastChecked>>> = Lazy::new(|| DashMap::new());
 static STREAMERS: Lazy<DashMap<User, ChannelStatus>> = Lazy::new(|| DashMap::new());
 static USER_CACHE: Lazy<DashMap<String, User>> = Lazy::new(|| DashMap::new());
 
-#[derive(Debug, Deserialize)]
-struct Users {
-    data: Vec<User>,
-}
-
-#[derive(Deserialize, PartialEq, Eq, Hash, Debug, Clone)]
-struct User {
-    id: String,
-    display_name: String,
-}
-
-impl std::fmt::Display for User {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.display_name)
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct Auth {
-    access_token: String,
-    #[allow(dead_code)]
-    expires_in: i64,
-}
-
-#[derive(Debug)]
-struct ClientId {
-    client_id: &'static str,
-}
-
-#[derive(Debug)]
-struct LastChecked {
-    time: DateTime<Utc>,
-    limit: Option<i64>,
-    streamer: User,
-    size: i64,
-}
-
-#[derive(Serialize)]
-struct Size {
-    size: i64,
-    is_message: bool,
-    message: &'static str,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct BoonLength {
-    time: DateTime<Utc>,
-    length: i64,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum BoonKind {
-    Cursed,
-    Blessed,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct Boon {
-    kind: BoonKind,
-    value: Option<i64>,
-    duration: Option<BoonLength>,
-}
-
-#[derive(Debug, Default)]
-struct ChannelStatus {
-    boons: HashMap<User, Boon>,
-    active_boon: Option<Boon>,
-    bounds: Bounds,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct Bounds {
-    upper: i64,
-    lower: i64,
-}
-
-impl Default for Bounds {
-    fn default() -> Self {
-        Bounds {
-            upper: 100,
-            lower: 1,
-        }
-    }
-}
-
-impl BoonLength {
-    fn active(&self) -> bool {
-        (Utc::now() - self.time).num_seconds() <= self.length
-    }
-}
-
 #[get("/cs")]
 fn legacy() -> String {
     let rand: i64 = rand::thread_rng().gen_range(1..=100);
     format!("{rand}")
-}
-
-type SizeResponse = Custom<Json<Size>>;
-
-fn ok_response(size: i64) -> SizeResponse {
-    Custom(
-        Status::Ok,
-        Json(Size {
-            size,
-            is_message: false,
-            message: "",
-        }),
-    )
-}
-
-fn make_response(status: Status, message: &'static str) -> SizeResponse {
-    Custom(
-        status,
-        Json(Size {
-            size: status.code as i64,
-            is_message: true,
-            message,
-        }),
-    )
 }
 
 async fn get_user(
