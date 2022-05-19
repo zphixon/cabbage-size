@@ -5,7 +5,7 @@ use chrono::Utc;
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use rand::Rng;
-use rocket::{http::Status, response::status::Custom as Response, serde::json::Json, State};
+use rocket::{http::Status, response::status::Custom, serde::json::Json, State};
 use serde::{Deserialize, Serialize};
 
 const USER_ID_URL: &'static str = "https://api.twitch.tv/helix/users";
@@ -47,7 +47,7 @@ struct LastChecked {
 }
 
 #[derive(Serialize)]
-struct SizeResponse {
+struct Size {
     size: i64,
     is_message: bool,
     message: &'static str,
@@ -74,13 +74,35 @@ fn legacy() -> String {
     format!("{rand}")
 }
 
-type MyResponse = Response<Json<SizeResponse>>;
+type SizeResponse = Custom<Json<Size>>;
+
+fn ok_response(size: i64) -> SizeResponse {
+    Custom(
+        Status::Ok,
+        Json(Size {
+            size,
+            is_message: false,
+            message: "",
+        }),
+    )
+}
+
+fn make_response(status: Status, message: &'static str) -> SizeResponse {
+    Custom(
+        status,
+        Json(Size {
+            size: status.code as i64,
+            is_message: true,
+            message,
+        }),
+    )
+}
 
 async fn get_user(
     auth: &State<Auth>,
     client_id: &State<ClientId>,
     user: &str,
-) -> Result<User, MyResponse> {
+) -> Result<User, SizeResponse> {
     // if we already know who this user is don't bother checking again
     if let Some(user_data) = USER_CACHE.get(user) {
         return Ok(user_data.clone());
@@ -101,15 +123,12 @@ async fn get_user(
     // but i don't have the patience rn
     let user_response: reqwest::Response = match user_response {
         Ok(user_response) => user_response,
-        Err(_) => {
-            return Err(Response(
+        Err(e) => {
+            dbg!(e);
+            return Err(make_response(
                 Status::InternalServerError,
-                Json(SizeResponse {
-                    size: 500,
-                    is_message: true,
-                    message: "twitch api request failed",
-                }),
-            ))
+                "twitch api request failed",
+            ));
         }
     };
 
@@ -118,26 +137,18 @@ async fn get_user(
         Ok(users) => users,
         Err(e) => {
             dbg!(e);
-            return Err(Response(
+            return Err(make_response(
                 Status::InternalServerError,
-                Json(SizeResponse {
-                    size: 500,
-                    is_message: true,
-                    message: "twitch json response nonsensical",
-                }),
+                "twitch json response nonsensical",
             ));
         }
     };
 
     // all of that was just getting the user in json form
     if users.data.is_empty() {
-        Err(Response(
+        Err(make_response(
             Status::InternalServerError,
-            Json(SizeResponse {
-                size: 500,
-                is_message: true,
-                message: "twitch returned no users",
-            }),
+            "twitch returned no users",
         ))
     } else {
         // throw 'em on the pile
@@ -165,7 +176,7 @@ async fn size(
     time_limit: Option<i64>,
     auth: &State<Auth>,
     client_id: &State<ClientId>,
-) -> MyResponse {
+) -> SizeResponse {
     // get the viewer and streamer twitch info (to verify a user exists)
     let viewer = match get_user(auth, client_id, viewer).await {
         Ok(viewer) => viewer,
@@ -189,14 +200,7 @@ async fn size(
             // there is a time limit
             if (Utc::now() - last_checked.time).num_seconds() <= limit {
                 // the time limit has not elapsed - do not update the size, just return it
-                return Response(
-                    Status::Ok,
-                    Json(SizeResponse {
-                        size: last_checked.size,
-                        is_message: false,
-                        message: "",
-                    }),
-                );
+                return ok_response(last_checked.size);
             } else {
                 // we are past the time limit - get a new size
             }
@@ -224,14 +228,7 @@ async fn size(
     let size = make_size(&mut bounds);
     lc.size = size;
 
-    Response(
-        Status::Ok,
-        Json(SizeResponse {
-            size,
-            is_message: false,
-            message: "",
-        }),
-    )
+    ok_response(size)
 }
 
 #[put("/reset?<streamer>&<upper>&<lower>")]
@@ -241,7 +238,7 @@ async fn change_bounds(
     lower: Option<i64>,
     auth: &State<Auth>,
     client_id: &State<ClientId>,
-) -> MyResponse {
+) -> SizeResponse {
     // there must be a better way to do this
     let streamer = match get_user(auth, client_id, streamer).await {
         Ok(streamer) => streamer,
@@ -253,14 +250,7 @@ async fn change_bounds(
     bounds.upper = upper.unwrap_or(100);
     bounds.lower = lower.unwrap_or(1);
 
-    Response(
-        Status::Ok,
-        Json(SizeResponse {
-            size: 200,
-            is_message: true,
-            message: "size reset",
-        }),
-    )
+    make_response(Status::Ok, "size reset")
 }
 
 #[get("/up")]
@@ -275,7 +265,7 @@ fn uptime(start: &State<chrono::DateTime<Utc>>) -> String {
 }
 
 #[post("/clean")]
-fn clean_viewers() -> MyResponse {
+fn clean_viewers() -> SizeResponse {
     let now = Utc::now();
 
     // for every viewer
@@ -290,14 +280,7 @@ fn clean_viewers() -> MyResponse {
     // if they don't have any checked times remove them
     VIEWERS.retain(|_, checks| !checks.is_empty());
 
-    Response(
-        Status::Ok,
-        Json(SizeResponse {
-            size: 200,
-            is_message: true,
-            message: "viewers purged",
-        }),
-    )
+    make_response(Status::Ok, "viewers purged")
 }
 
 #[get("/status")]
