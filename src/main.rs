@@ -61,19 +61,19 @@ struct Size {
     message: &'static str,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 struct BoonLength {
     time: DateTime<Utc>,
     length: i64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 enum BoonKind {
     Cursed,
     Blessed,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 struct Boon {
     kind: BoonKind,
     value: Option<i64>,
@@ -87,7 +87,7 @@ struct ChannelStatus {
     bounds: Bounds,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 struct Bounds {
     upper: i64,
     lower: i64,
@@ -99,6 +99,12 @@ impl Default for Bounds {
             upper: 100,
             lower: 1,
         }
+    }
+}
+
+impl BoonLength {
+    fn passed(&self) -> bool {
+        (Utc::now() - self.time).num_seconds() <= self.length
     }
 }
 
@@ -139,9 +145,11 @@ async fn get_user(
 ) -> Result<User, SizeResponse> {
     // if we already know who this user is don't bother checking again
     if let Some(user_data) = USER_CACHE.get(user) {
+        rocket::debug!("user {user} cached => {:?}", *user_data);
         return Ok(user_data.clone());
     }
 
+    rocket::debug!("looking for {user} from twitch api");
     let client = reqwest::Client::new();
     let params = [("login", user)];
 
@@ -157,8 +165,8 @@ async fn get_user(
     // but i don't have the patience rn
     let user_response: reqwest::Response = match user_response {
         Ok(user_response) => user_response,
-        Err(e) => {
-            dbg!(e);
+        Err(ref e) => {
+            rocket::error!("{user_response:?} {e:?}");
             return Err(make_response(
                 Status::InternalServerError,
                 "twitch api request failed",
@@ -166,11 +174,15 @@ async fn get_user(
         }
     };
 
-    let users = user_response.json::<Users>().await;
+    let raw = user_response
+        .text()
+        .await
+        .unwrap_or_else(|err| format!("{err:?}"));
+    let users = rocket::serde::json::from_str::<Users>(&raw);
     let mut users = match users {
         Ok(users) => users,
         Err(e) => {
-            dbg!(e);
+            rocket::error!("{raw} {e:?}");
             return Err(make_response(
                 Status::InternalServerError,
                 "twitch json response nonsensical",
@@ -180,6 +192,7 @@ async fn get_user(
 
     // all of that was just getting the user in json form
     if users.data.is_empty() {
+        rocket::error!("no user named {user}");
         Err(make_response(
             Status::InternalServerError,
             "twitch returned no users",
@@ -187,6 +200,8 @@ async fn get_user(
     } else {
         // throw 'em on the pile
         let user_data = users.data.pop().unwrap();
+        rocket::debug!("found user {user} => {:?}", user_data);
+
         USER_CACHE.insert(user.into(), user_data.clone());
         Ok(user_data)
     }
@@ -196,9 +211,13 @@ fn make_size(bounds: &mut Bounds) -> i64 {
     let Bounds { upper, lower } = bounds;
     let rand: i64 = rand::thread_rng().gen_range(*lower..=*upper);
     if rand == *lower {
+        rocket::debug!("generated {rand}, new lower bound");
         *lower -= 1;
     } else if rand == *upper {
+        rocket::debug!("generated {rand}, new upper bound");
         *upper += 1;
+    } else {
+        rocket::debug!("generated {rand}");
     }
     rand
 }
@@ -233,9 +252,14 @@ async fn size(
         if let Some(limit) = time_limit {
             // there is a time limit
             if (Utc::now() - last_checked.time).num_seconds() <= limit {
+                rocket::info!(
+                    "{streamer}: {viewer} should try again {limit}s after {}",
+                    last_checked.time
+                );
                 // the time limit has not elapsed - do not update the size, just return it
                 return ok_response(last_checked.size);
             } else {
+                rocket::debug!("{streamer}: {viewer} time limit of {limit}s passed");
                 // we are past the time limit - get a new size
             }
         } else {
@@ -247,6 +271,7 @@ async fn size(
         last_checked.limit = time_limit;
         lc = last_checked;
     } else {
+        rocket::debug!("{streamer}: {viewer} is new, can get a new size in {time_limit:?}s");
         // we have not checked our size in this streamer's chat before - get a new size
         last_checked_streams.push(LastChecked {
             streamer: streamer.clone(),
@@ -258,46 +283,77 @@ async fn size(
     }
 
     // get the new size
-    let mut channel_status = STREAMERS.entry(streamer).or_default();
-    let size = if let Entry::Occupied(boon_entry) = channel_status.boons.entry(viewer.clone()) {
-        let boon = boon_entry.get();
-        let elapsed = if let Some(duration) = &boon.duration {
-            (Utc::now() - duration.time).num_seconds() <= duration.length
-        } else {
-            true
-        };
+    let mut channel_status = STREAMERS.entry(streamer.clone()).or_default();
+    let bounds = channel_status.bounds;
 
-        if elapsed {
-            let _ = boon_entry.remove();
-            make_size(&mut channel_status.bounds)
+    use BoonCalculation::*;
+    #[derive(Debug)]
+    enum BoonCalculation {
+        Predetermined(i64),
+        Random,
+    }
+    let mut boon_calculation = Random;
+
+    if let Entry::Occupied(viewer_boon_entry) = channel_status.boons.entry(viewer.clone()) {
+        let viewer_boon = viewer_boon_entry.get();
+        if let Some(value) = viewer_boon.value {
+            boon_calculation = Predetermined(value);
         } else {
-            match boon.kind {
-                BoonKind::Cursed => boon.value.unwrap_or(channel_status.bounds.lower),
-                BoonKind::Blessed => boon.value.unwrap_or(channel_status.bounds.upper),
-            }
+            boon_calculation = Predetermined(match viewer_boon.kind {
+                BoonKind::Blessed => bounds.upper,
+                BoonKind::Cursed => bounds.lower,
+            });
         }
-    } else if channel_status.active_boon.is_some() {
-        let boon = channel_status.active_boon.as_ref().unwrap();
-        let elapsed = if let Some(duration) = &boon.duration {
-            (Utc::now() - duration.time).num_seconds() <= duration.length
-        } else {
-            true
-        };
 
-        if elapsed {
+        rocket::info!("{streamer}: {viewer} had been {:?}!", viewer_boon.kind);
+
+        if let Some(duration) = &viewer_boon.duration {
+            if duration.passed() {
+                boon_calculation = Random;
+                viewer_boon_entry.remove();
+            } else {
+                rocket::info!(
+                    "{streamer}: {viewer}'s {:?} status remains.",
+                    viewer_boon.kind
+                );
+            }
+        } else {
+            viewer_boon_entry.remove();
+        }
+    } else if let Some(active_boon) = channel_status.active_boon {
+        if let Some(value) = active_boon.value {
+            boon_calculation = Predetermined(value);
+        } else {
+            boon_calculation = Predetermined(match active_boon.kind {
+                BoonKind::Blessed => bounds.upper,
+                BoonKind::Cursed => bounds.lower,
+            });
+        }
+
+        rocket::info!("{streamer}: channel had been {:?}!", active_boon.kind);
+
+        if let Some(duration) = &active_boon.duration {
+            if duration.passed() {
+                boon_calculation = Random;
+                channel_status.active_boon = None;
+            } else {
+                rocket::info!(
+                    "{streamer}: the channel's {:?} status remains.",
+                    active_boon.kind
+                );
+            }
+        } else {
             channel_status.active_boon = None;
-            make_size(&mut channel_status.bounds)
-        } else {
-            match boon.kind {
-                BoonKind::Cursed => boon.value.unwrap_or(channel_status.bounds.lower),
-                BoonKind::Blessed => boon.value.unwrap_or(channel_status.bounds.upper),
-            }
         }
-    } else {
-        make_size(&mut channel_status.bounds)
+    }
+
+    let size = match boon_calculation {
+        Predetermined(size) => size,
+        Random => make_size(&mut channel_status.bounds),
     };
 
     lc.size = size;
+    rocket::info!("{streamer}: {viewer} got size {size}");
 
     ok_response(size)
 }
