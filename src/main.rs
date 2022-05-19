@@ -1,7 +1,9 @@
 #[macro_use]
 extern crate rocket;
 
-use chrono::Utc;
+use std::collections::{hash_map::Entry, HashMap};
+
+use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use rand::Rng;
@@ -12,7 +14,7 @@ const USER_ID_URL: &'static str = "https://api.twitch.tv/helix/users";
 const TOKEN_URL: &'static str = "https://id.twitch.tv/oauth2/token";
 
 static VIEWERS: Lazy<DashMap<User, Vec<LastChecked>>> = Lazy::new(|| DashMap::new());
-static STREAMERS: Lazy<DashMap<User, Bounds>> = Lazy::new(|| DashMap::new());
+static STREAMERS: Lazy<DashMap<User, ChannelStatus>> = Lazy::new(|| DashMap::new());
 static USER_CACHE: Lazy<DashMap<String, User>> = Lazy::new(|| DashMap::new());
 
 #[derive(Debug, Deserialize)]
@@ -24,6 +26,12 @@ struct Users {
 struct User {
     id: String,
     display_name: String,
+}
+
+impl std::fmt::Display for User {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.display_name)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -40,7 +48,7 @@ struct ClientId {
 
 #[derive(Debug)]
 struct LastChecked {
-    time: chrono::DateTime<Utc>,
+    time: DateTime<Utc>,
     limit: Option<i64>,
     streamer: User,
     size: i64,
@@ -51,6 +59,32 @@ struct Size {
     size: i64,
     is_message: bool,
     message: &'static str,
+}
+
+#[derive(Debug)]
+struct BoonLength {
+    time: DateTime<Utc>,
+    length: i64,
+}
+
+#[derive(Debug)]
+enum BoonKind {
+    Cursed,
+    Blessed,
+}
+
+#[derive(Debug)]
+struct Boon {
+    kind: BoonKind,
+    value: Option<i64>,
+    duration: Option<BoonLength>,
+}
+
+#[derive(Debug, Default)]
+struct ChannelStatus {
+    boons: HashMap<User, Boon>,
+    active_boon: Option<Boon>,
+    bounds: Bounds,
 }
 
 #[derive(Debug)]
@@ -190,7 +224,7 @@ async fn size(
 
     // this is hacky wheee - get the times a user has last checked their size
     let lc: &mut LastChecked;
-    let mut last_checked_streams = VIEWERS.entry(viewer).or_default();
+    let mut last_checked_streams = VIEWERS.entry(viewer.clone()).or_default();
     if let Some(last_checked) = last_checked_streams
         .iter_mut()
         .find(|lc| lc.streamer == streamer)
@@ -224,8 +258,45 @@ async fn size(
     }
 
     // get the new size
-    let mut bounds = STREAMERS.entry(streamer).or_default();
-    let size = make_size(&mut bounds);
+    let mut channel_status = STREAMERS.entry(streamer).or_default();
+    let size = if let Entry::Occupied(boon_entry) = channel_status.boons.entry(viewer.clone()) {
+        let boon = boon_entry.get();
+        let elapsed = if let Some(duration) = &boon.duration {
+            (Utc::now() - duration.time).num_seconds() <= duration.length
+        } else {
+            true
+        };
+
+        if elapsed {
+            let _ = boon_entry.remove();
+            make_size(&mut channel_status.bounds)
+        } else {
+            match boon.kind {
+                BoonKind::Cursed => boon.value.unwrap_or(channel_status.bounds.lower),
+                BoonKind::Blessed => boon.value.unwrap_or(channel_status.bounds.upper),
+            }
+        }
+    } else if channel_status.active_boon.is_some() {
+        let boon = channel_status.active_boon.as_ref().unwrap();
+        let elapsed = if let Some(duration) = &boon.duration {
+            (Utc::now() - duration.time).num_seconds() <= duration.length
+        } else {
+            true
+        };
+
+        if elapsed {
+            channel_status.active_boon = None;
+            make_size(&mut channel_status.bounds)
+        } else {
+            match boon.kind {
+                BoonKind::Cursed => boon.value.unwrap_or(channel_status.bounds.lower),
+                BoonKind::Blessed => boon.value.unwrap_or(channel_status.bounds.upper),
+            }
+        }
+    } else {
+        make_size(&mut channel_status.bounds)
+    };
+
     lc.size = size;
 
     ok_response(size)
@@ -246,15 +317,70 @@ async fn change_bounds(
     };
 
     // set the new bounds
-    let mut bounds = STREAMERS.entry(streamer).or_default();
-    bounds.upper = upper.unwrap_or(100);
-    bounds.lower = lower.unwrap_or(1);
+    let mut channel_status = STREAMERS.entry(streamer).or_default();
+    channel_status.bounds.upper = upper.unwrap_or(100);
+    channel_status.bounds.lower = lower.unwrap_or(1);
 
     make_response(Status::Ok, "size reset")
 }
 
+#[get("/bless?<viewer>&<streamer>&<value>&<time_limit>")]
+async fn bless(
+    streamer: &str,
+    viewer: Option<&str>,
+    value: Option<i64>,
+    time_limit: Option<i64>,
+    auth: &State<Auth>,
+    client_id: &State<ClientId>,
+) -> SizeResponse {
+    let duration = time_limit.map(|length| BoonLength {
+        time: Utc::now(),
+        length,
+    });
+
+    let boon = Boon {
+        kind: BoonKind::Blessed,
+        value,
+        duration,
+    };
+
+    let streamer = match get_user(auth, client_id, streamer).await {
+        Ok(streamer) => streamer,
+        Err(response) => return response,
+    };
+
+    let mut channel_status = STREAMERS.entry(streamer).or_default();
+
+    if let Some(viewer) = viewer {
+        let viewer = match get_user(auth, client_id, viewer).await {
+            Ok(viewer) => viewer,
+            Err(response) => return response,
+        };
+
+        channel_status.boons.insert(viewer, boon);
+    } else {
+        channel_status.active_boon = Some(boon);
+    }
+
+    make_response(Status::Ok, "user blessed")
+}
+
+#[get("/curse?<viewer>&<streamer>&<value>&<time_limit>")]
+fn curse(
+    streamer: &str,
+    viewer: Option<&str>,
+    value: Option<i64>,
+    time_limit: Option<i64>,
+) -> SizeResponse {
+    let _ = streamer;
+    let _ = viewer;
+    let _ = value;
+    let _ = time_limit;
+    make_response(Status::Ok, "user cursed")
+}
+
 #[get("/up")]
-fn uptime(start: &State<chrono::DateTime<Utc>>) -> String {
+fn uptime(start: &State<DateTime<Utc>>) -> String {
     // deref go brrr
     let diff = Utc::now() - **start;
     let days = diff.num_days();
@@ -285,23 +411,41 @@ fn clean_viewers() -> SizeResponse {
 
 #[get("/status")]
 fn status() -> String {
-    let mut s = String::from("\n");
+    let mut s = String::from("users:\n");
     for entry in VIEWERS.iter() {
         let viewer = entry.key();
-        let lc = entry.value();
-        s += &format!("{viewer:?} => {lc:?}\n");
+        let last_checked = entry.value();
+        s += &format!("\t{}\n", viewer);
+        for check in last_checked {
+            s += &format!("\t\t{} => {}", check.streamer, check.size);
+            if let Some(limit) = check.limit {
+                s += &format!(", refresh in {}s after {}", limit, check.time);
+            }
+            s += "\n";
+        }
     }
+    s += "streamers:\n";
     for entry in STREAMERS.iter() {
         let streamer = entry.key();
-        let bounds = entry.value();
-        s += &format!("{streamer:?} => {bounds:?}\n");
+        let status = entry.value();
+        s += &format!("\t{streamer} => {:?}", status.bounds);
+        if let Some(boon) = &status.active_boon {
+            if let Some(duration) = &boon.duration {
+                s += &format!(
+                    " (users are {:?} until {}s after {})",
+                    boon.kind, duration.length, duration.time
+                );
+            } else {
+                s += &format!(" (next user is {:?})", boon.kind);
+            }
+        }
+        s += "\n";
+        for (user, boon) in &status.boons {
+            s += &format!("\t\t{user}: {:?}\n", boon.kind);
+        }
     }
-    s
+    s + "\n"
 }
-
-// TODO:
-// add bless/curse - makes the next /size request the upper or lower bound
-//                 - for a specific user or any user, maybe with a specific value
 
 #[rocket::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -335,7 +479,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .manage(Utc::now())
         .mount(
             "/",
-            routes![legacy, size, uptime, change_bounds, status, clean_viewers,],
+            routes![
+                legacy,
+                size,
+                uptime,
+                change_bounds,
+                status,
+                clean_viewers,
+                bless,
+                curse,
+            ],
         )
         .launch()
         .await?;
