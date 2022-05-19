@@ -7,9 +7,7 @@ use chrono::Utc;
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use rand::Rng;
-use rocket::{
-    http::Status, response::status::Custom as Response, serde::json::Json, State,
-};
+use rocket::{http::Status, response::status::Custom as Response, serde::json::Json, State};
 use serde::{Deserialize, Serialize};
 
 const USER_ID_URL: &'static str = "https://api.twitch.tv/helix/users";
@@ -78,11 +76,13 @@ fn legacy() -> String {
     format!("{rand}")
 }
 
+type MyResponse = Response<Json<SizeResponse>>;
+
 async fn get_user(
     auth: &State<Auth>,
     client_id: &State<ClientId>,
     user: &str,
-) -> Result<User, Response<Json<SizeResponse>>> {
+) -> Result<User, MyResponse> {
     if let Some(user_data) = USER_CACHE.get(user) {
         return Ok(user_data.clone());
     }
@@ -162,7 +162,7 @@ async fn size(
     time_limit: Option<i64>,
     auth: &State<Auth>,
     client_id: &State<ClientId>,
-) -> Response<Json<SizeResponse>> {
+) -> MyResponse {
     let viewer = match get_user(auth, client_id, viewer).await {
         Ok(viewer) => viewer,
         Err(response) => return response,
@@ -214,6 +214,7 @@ async fn size(
     }
 
     let mut bounds = STREAMERS.entry(streamer).or_default();
+    println!("{:?}", *bounds);
     let size = make_size(&mut bounds);
     lc.size = size;
 
@@ -225,6 +226,81 @@ async fn size(
             message: "",
         }),
     )
+}
+
+#[put("/reset?<streamer>&<upper>&<lower>")]
+async fn change_bounds(
+    streamer: &str,
+    upper: Option<i64>,
+    lower: Option<i64>,
+    auth: &State<Auth>,
+    client_id: &State<ClientId>,
+) -> MyResponse {
+    let streamer = match get_user(auth, client_id, streamer).await {
+        Ok(streamer) => streamer,
+        Err(response) => return response,
+    };
+
+    let mut bounds = STREAMERS.entry(streamer).or_default();
+    bounds.upper = upper.unwrap_or(100);
+    bounds.lower = lower.unwrap_or(1);
+
+    println!("{:?} {upper:?} {lower:?}", *bounds);
+
+    Response(
+        Status::Ok,
+        Json(SizeResponse {
+            size: 200,
+            is_message: true,
+            message: "size reset",
+        }),
+    )
+}
+
+#[get("/up")]
+fn uptime(start: &State<chrono::DateTime<Utc>>) -> String {
+    let diff = Utc::now() - **start;
+    let days = diff.num_days();
+    let hours = diff.num_hours() % 24;
+    let minutes = diff.num_minutes() % 60;
+    let seconds = diff.num_seconds() % 60;
+    format!("{days}d {hours}h {minutes}m {seconds}s")
+}
+
+#[post("/clean")]
+fn clean_viewers() -> MyResponse {
+    let now = Utc::now();
+    VIEWERS.iter_mut().for_each(|mut rmm| {
+        rmm.value_mut().retain(|check| {
+            check.limit.is_some() && (now - check.time).num_seconds() <= check.limit.unwrap()
+        })
+    });
+    VIEWERS.retain(|_, checks| !checks.is_empty());
+
+    Response(
+        Status::Ok,
+        Json(SizeResponse {
+            size: 200,
+            is_message: true,
+            message: "viewers purged",
+        }),
+    )
+}
+
+#[get("/status")]
+fn status() -> String {
+    let mut s = String::from("\n");
+    for entry in VIEWERS.iter() {
+        let viewer = entry.key();
+        let lc = entry.value();
+        s += &format!("{viewer:?} => {lc:?}\n");
+    }
+    for entry in STREAMERS.iter() {
+        let streamer = entry.key();
+        let bounds = entry.value();
+        s += &format!("{streamer:?} => {bounds:?}\n");
+    }
+    s
 }
 
 #[rocket::main]
@@ -253,7 +329,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _rocket = rocket::build()
         .manage(auth)
         .manage(ClientId { client_id })
-        .mount("/", routes![legacy, size])
+        .manage(Utc::now())
+        .mount(
+            "/",
+            routes![legacy, size, uptime, change_bounds, status, clean_viewers,],
+        )
         .launch()
         .await?;
 
