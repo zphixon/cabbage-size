@@ -436,16 +436,45 @@ async fn bless(
 }
 
 #[get("/curse?<viewer>&<streamer>&<value>&<time_limit>")]
-fn curse(
+async fn curse(
     streamer: &str,
     viewer: Option<&str>,
     value: Option<i64>,
     time_limit: Option<i64>,
+    auth: &State<Auth>,
+    client_id: &State<ClientId>,
 ) -> SizeResponse {
-    let _ = streamer;
-    let _ = viewer;
-    let _ = value;
-    let _ = time_limit;
+    let duration = time_limit.map(|length| BoonLength {
+        time: Utc::now(),
+        length,
+    });
+
+    let boon = Boon {
+        kind: BoonKind::Cursed,
+        value,
+        duration,
+    };
+
+    let streamer = match get_user(auth, client_id, streamer).await {
+        Ok(streamer) => streamer,
+        Err(response) => return response,
+    };
+
+    let mut channel_status = STREAMERS.entry(streamer.clone()).or_default();
+
+    if let Some(viewer) = viewer {
+        let viewer = match get_user(auth, client_id, viewer).await {
+            Ok(viewer) => viewer,
+            Err(response) => return response,
+        };
+
+        rocket::info!("{streamer}: {viewer} has been cursed! {boon:?}");
+        channel_status.boons.insert(viewer, boon);
+    } else {
+        rocket::info!("{streamer}: chat has been cursed! {boon:?}");
+        channel_status.active_boon = Some(boon);
+    }
+
     make_response(Status::Ok, "user cursed")
 }
 
