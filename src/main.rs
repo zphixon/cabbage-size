@@ -1,5 +1,3 @@
-// vim: set nu rnu sw=4 et ai si
-
 #[macro_use]
 extern crate rocket;
 
