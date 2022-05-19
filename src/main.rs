@@ -103,7 +103,7 @@ impl Default for Bounds {
 }
 
 impl BoonLength {
-    fn passed(&self) -> bool {
+    fn active(&self) -> bool {
         (Utc::now() - self.time).num_seconds() <= self.length
     }
 }
@@ -305,10 +305,12 @@ async fn size(
             });
         }
 
-        rocket::info!("{streamer}: {viewer} had been {:?}!", viewer_boon.kind);
-
         if let Some(duration) = &viewer_boon.duration {
-            if duration.passed() {
+            if !duration.active() {
+                rocket::info!(
+                    "{streamer}: {viewer}'s {:?} status is expired",
+                    viewer_boon.kind
+                );
                 boon_calculation = Random;
                 viewer_boon_entry.remove();
             } else {
@@ -318,6 +320,10 @@ async fn size(
                 );
             }
         } else {
+            rocket::info!(
+                "{streamer}: {viewer}'s {:?} status has been consumed",
+                viewer_boon.kind
+            );
             viewer_boon_entry.remove();
         }
     } else if let Some(active_boon) = channel_status.active_boon {
@@ -330,19 +336,25 @@ async fn size(
             });
         }
 
-        rocket::info!("{streamer}: channel had been {:?}!", active_boon.kind);
-
         if let Some(duration) = &active_boon.duration {
-            if duration.passed() {
+            if !duration.active() {
+                rocket::info!(
+                    "{streamer}: chat's {:?} status is expired",
+                    active_boon.kind
+                );
                 boon_calculation = Random;
                 channel_status.active_boon = None;
             } else {
                 rocket::info!(
-                    "{streamer}: the channel's {:?} status remains.",
+                    "{streamer}: the chat's {:?} status remains.",
                     active_boon.kind
                 );
             }
         } else {
+            rocket::info!(
+                "{streamer}: chat's {:?} has been consumed",
+                active_boon.kind
+            );
             channel_status.active_boon = None;
         }
     }
@@ -405,7 +417,7 @@ async fn bless(
         Err(response) => return response,
     };
 
-    let mut channel_status = STREAMERS.entry(streamer).or_default();
+    let mut channel_status = STREAMERS.entry(streamer.clone()).or_default();
 
     if let Some(viewer) = viewer {
         let viewer = match get_user(auth, client_id, viewer).await {
@@ -413,8 +425,10 @@ async fn bless(
             Err(response) => return response,
         };
 
+        rocket::info!("{streamer}: {viewer} has been blessed! {boon:?}");
         channel_status.boons.insert(viewer, boon);
     } else {
+        rocket::info!("{streamer}: chat has been blessed! {boon:?}");
         channel_status.active_boon = Some(boon);
     }
 
