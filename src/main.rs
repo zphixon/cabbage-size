@@ -83,6 +83,7 @@ async fn get_user(
     client_id: &State<ClientId>,
     user: &str,
 ) -> Result<User, MyResponse> {
+    // if we already know who this user is don't bother checking again
     if let Some(user_data) = USER_CACHE.get(user) {
         return Ok(user_data.clone());
     }
@@ -98,6 +99,8 @@ async fn get_user(
         .send()
         .await;
 
+    // there's some way to implement your own rocket responses
+    // but i don't have the patience rn
     let user_response: reqwest::Response = match user_response {
         Ok(user_response) => user_response,
         Err(_) => {
@@ -128,6 +131,7 @@ async fn get_user(
         }
     };
 
+    // all of that was just getting the user in json form
     if users.data.is_empty() {
         Err(Response(
             Status::InternalServerError,
@@ -138,6 +142,7 @@ async fn get_user(
             }),
         ))
     } else {
+        // throw 'em on the pile
         let user_data = users.data.pop().unwrap();
         USER_CACHE.insert(user.into(), user_data.clone());
         Ok(user_data)
@@ -163,6 +168,7 @@ async fn size(
     auth: &State<Auth>,
     client_id: &State<ClientId>,
 ) -> MyResponse {
+    // get the viewer and streamer twitch info (to verify a user exists)
     let viewer = match get_user(auth, client_id, viewer).await {
         Ok(viewer) => viewer,
         Err(response) => return response,
@@ -173,6 +179,7 @@ async fn size(
         Err(response) => return response,
     };
 
+    // this is hacky wheee - get the times a user has last checked their size
     let lc: &mut LastChecked;
     let mut last_checked_streams = VIEWERS.entry(viewer).or_default();
     if let Some(last_checked) = last_checked_streams
@@ -199,6 +206,7 @@ async fn size(
             // there is no time limit - get a new size
         }
 
+        // and also update the time and new limit if it exists
         last_checked.time = Utc::now();
         last_checked.limit = time_limit;
         lc = last_checked;
@@ -213,8 +221,8 @@ async fn size(
         lc = last_checked_streams.last_mut().unwrap();
     }
 
+    // get the new size
     let mut bounds = STREAMERS.entry(streamer).or_default();
-    println!("{:?}", *bounds);
     let size = make_size(&mut bounds);
     lc.size = size;
 
@@ -236,16 +244,16 @@ async fn change_bounds(
     auth: &State<Auth>,
     client_id: &State<ClientId>,
 ) -> MyResponse {
+    // there must be a better way to do this
     let streamer = match get_user(auth, client_id, streamer).await {
         Ok(streamer) => streamer,
         Err(response) => return response,
     };
 
+    // set the new bounds
     let mut bounds = STREAMERS.entry(streamer).or_default();
     bounds.upper = upper.unwrap_or(100);
     bounds.lower = lower.unwrap_or(1);
-
-    println!("{:?} {upper:?} {lower:?}", *bounds);
 
     Response(
         Status::Ok,
@@ -259,6 +267,7 @@ async fn change_bounds(
 
 #[get("/up")]
 fn uptime(start: &State<chrono::DateTime<Utc>>) -> String {
+    // deref go brrr
     let diff = Utc::now() - **start;
     let days = diff.num_days();
     let hours = diff.num_hours() % 24;
@@ -270,11 +279,17 @@ fn uptime(start: &State<chrono::DateTime<Utc>>) -> String {
 #[post("/clean")]
 fn clean_viewers() -> MyResponse {
     let now = Utc::now();
+
+    // for every viewer
     VIEWERS.iter_mut().for_each(|mut rmm| {
+        // go through last checked
         rmm.value_mut().retain(|check| {
+            // if the checked time is elapsed remove it
             check.limit.is_some() && (now - check.time).num_seconds() <= check.limit.unwrap()
         })
     });
+
+    // if they don't have any checked times remove them
     VIEWERS.retain(|_, checks| !checks.is_empty());
 
     Response(
@@ -303,11 +318,17 @@ fn status() -> String {
     s
 }
 
+// TODO:
+// add bless/curse - makes the next /size request the upper or lower bound
+//                 - for a specific user or any user, maybe with a specific value
+
 #[rocket::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // TODO make this not part of the binary lol
     let client_id = include_str!("../client_id").trim();
     let client_secret = include_str!("../client_secret").trim();
 
+    // get twitch authorization
     let params = [
         ("client_id", client_id),
         ("client_secret", client_secret),
@@ -326,6 +347,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("[{}] starting {auth:?}", Utc::now());
 
+    // start the server - don't forget to add the routes here
     let _rocket = rocket::build()
         .manage(auth)
         .manage(ClientId { client_id })
