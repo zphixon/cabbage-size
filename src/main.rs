@@ -434,17 +434,33 @@ fn status() -> String {
 
 #[rocket::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // TODO make this not part of the binary lol
-    let client_id = include_str!("../client_id").trim();
-    let client_secret = include_str!("../client_secret").trim();
+    env_logger::init();
+    let args = std::env::args().collect::<Vec<_>>();
+    let contents = std::fs::read_to_string(args.get(1).expect("need config filename"))
+        .expect("couldn't read config");
+    let toml = contents
+        .parse::<toml_edit::Document>()
+        .expect("invalid toml");
+
+    let client_id = String::from(toml["client_id"].as_str().expect("need client_id str"));
+    let client_secret = String::from(
+        toml["client_secret"]
+            .as_str()
+            .expect("need client_secret str"),
+    );
 
     // get twitch authorization
     let params = [
-        ("client_id", client_id),
-        ("client_secret", client_secret),
+        ("client_id", client_id.as_str()),
+        ("client_secret", client_secret.as_str()),
         ("grant_type", "client_credentials"),
         ("scope", "user:read:subscriptions"),
     ];
+    println!("{params:?}");
+    println!(
+        "{}",
+        reqwest::Url::parse_with_params(TOKEN_URL, params).unwrap()
+    );
 
     let client = reqwest::Client::new();
     let auth = client
@@ -452,15 +468,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .form(&params)
         .send()
         .await?
-        .json::<Auth>()
+        .text()
         .await?;
+
+    println!("{}", auth);
+    let auth = rocket::serde::json::from_str::<Auth>(&auth)?;
 
     println!("[{}] starting {auth:?}", Utc::now());
 
     // start the server - don't forget to add the routes here
     let _rocket = rocket::build()
         .manage(auth)
-        .manage(ClientId { client_id })
+        .manage(ClientId {
+            client_id: Box::leak(client_id.into_boxed_str()),
+        })
         .manage(Utc::now())
         .mount(
             "/",

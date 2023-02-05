@@ -14,3 +14,5 @@ chrono = '0.4.19'
 dashmap = '5.3.2'
 serde = { version = '*', features = ['derive'] }
 reqwest = { version = '0.11.10', features = ['json', 'blocking'] }
+toml_edit = { version = '0.19', default-features = false }
+env_logger = '0.10.0'
