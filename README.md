@@ -29,20 +29,20 @@ optional parameters:
 simple example:
 
 ```shell
-$ curl -sX GET localhost:12002/size?viewer=teej_dv&streamer=theprimeagen
+$ curl -sX GET localhost:12002/size?viewer=vampirechicken&streamer=imrosen
 {"size":14,"is_message":false,"message":""}
 ```
 
 example with time limit:
 
 ```shell
-$ curl -sX GET localhost:12002/size?viewer=teej_dv&streamer=theprimeagen&time_limit=600
+$ curl -sX GET localhost:12002/size?viewer=vampirechicken&streamer=imrosen&time_limit=600
 {"size":3,"is_message":false,"message":""}
 $ # instantly
-$ curl -sX GET localhost:12002/size?viewer=teej_dv&streamer=theprimeagen&time_limit=600
+$ curl -sX GET localhost:12002/size?viewer=vampirechicken&streamer=imrosen&time_limit=600
 {"size":3,"is_message":false,"message":""}
 $ # 10 minutes later
-$ curl -sX GET localhost:12002/size?viewer=teej_dv&streamer=theprimeagen&time_limit=600
+$ curl -sX GET localhost:12002/size?viewer=vampirechicken&streamer=imrosen&time_limit=600
 {"size":99,"is_message":false,"message":""}
 ```
 
@@ -62,7 +62,7 @@ optional parameters:
 example:
 
 ```shell
-$ curl -sX PUT localhost:12002/reset?streamer=theprimeagen
+$ curl -sX PUT localhost:12002/reset?streamer=imrosen
 { "size":0,"is_message":true,"message"="reset size"}
 ```
 
