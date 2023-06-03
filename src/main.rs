@@ -1,18 +1,16 @@
 #[macro_use]
 extern crate rocket;
 
-use std::collections::hash_map::Entry;
-
 use chrono::{DateTime, Utc};
-use dashmap::DashMap;
-use once_cell::sync::Lazy;
-use rand::Rng;
-use rocket::{http::Status, State};
-
 use cs::{
     make_response, ok_response, Auth, Boon, BoonKind, BoonLength, Bounds, ChannelStatus, ClientId,
     LastChecked, SizeResponse, User, Users, TOKEN_URL, USER_ID_URL,
 };
+use dashmap::DashMap;
+use once_cell::sync::Lazy;
+use rand::Rng;
+use rocket::{http::Status, State};
+use std::collections::hash_map::Entry;
 
 static VIEWERS: Lazy<DashMap<User, Vec<LastChecked>>> = Lazy::new(|| DashMap::new());
 static STREAMERS: Lazy<DashMap<User, ChannelStatus>> = Lazy::new(|| DashMap::new());

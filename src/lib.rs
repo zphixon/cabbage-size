@@ -1,8 +1,7 @@
-use std::collections::HashMap;
-
 use chrono::{DateTime, Utc};
 use rocket::{http::Status, response::status::Custom, serde::json::Json};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 pub const USER_ID_URL: &'static str = "https://api.twitch.tv/helix/users";
 pub const TOKEN_URL: &'static str = "https://id.twitch.tv/oauth2/token";
